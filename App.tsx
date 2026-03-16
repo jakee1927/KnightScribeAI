@@ -79,6 +79,7 @@ const App: React.FC = () => {
     feedbackStyle: 'scoring_with_feedback',
     autoInsertFeedback: false,
     rubricContext: '',
+    rubricFileData: undefined,
     rubric: [
       { id: '1', name: 'Structure', description: 'Logical flow and paragraph organization.', maxPoints: 10 },
       { id: '2', name: 'Clarity', description: 'Precision of language and lack of ambiguity.', maxPoints: 10 },
@@ -330,6 +331,7 @@ const App: React.FC = () => {
                   setRubric={(r) => setConfig({ ...config, rubric: r })}
                   rubricContext={config.rubricContext}
                   setRubricContext={(context) => setConfig({ ...config, rubricContext: context })}
+                  setRubricFileData={(fileData) => setConfig({ ...config, rubricFileData: fileData })}
                 />
               </section>
 

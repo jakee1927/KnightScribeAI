@@ -64,6 +64,7 @@ const SubmissionManager: React.FC<Props> = ({ submissions, setSubmissions }) => 
             id: Math.random().toString(36).substr(2, 9),
             studentName: file.name.replace(/\.[^/.]+$/, ""),
             content: processed.content,
+            fileData: processed.fileData,
             origin: 'uploaded_file',
             status: 'pending',
           };
@@ -146,7 +147,7 @@ const SubmissionManager: React.FC<Props> = ({ submissions, setSubmissions }) => 
           </div>
           <div>
             <h4 className="font-semibold text-slate-700">Batch Upload Submissions</h4>
-            <p className="text-xs text-slate-500 px-4 mt-1">Upload .txt, .pdf, .docx, or image files. PDF/image files are OCR-converted to markdown first.</p>
+            <p className="text-xs text-slate-500 px-4 mt-1">Upload .txt, .pdf, .docx, or image files. Text is extracted where possible; image files are attached for direct model grading.</p>
           </div>
           <label className={`bg-slate-800 text-white px-6 py-2 rounded-lg transition-colors font-medium ${isProcessingFiles ? 'opacity-70 pointer-events-none' : 'cursor-pointer hover:bg-slate-900'}`}>
             {isProcessingFiles ? (

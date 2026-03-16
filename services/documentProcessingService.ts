@@ -1,20 +1,11 @@
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import * as mammoth from 'mammoth';
-
-const OLLAMA_API_URL = '/ollama/api/chat';
-const OCR_MODEL = 'deepseek-ocr:latest';
-const OCR_PROMPT = '<image>\n<|grounding|>Convert the document to markdown.';
+import { FileData } from '../types';
 
 GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
   import.meta.url
 ).toString();
-
-interface OllamaOcrResponse {
-  message?: {
-    content?: string;
-  };
-}
 
 type SourceKind = 'pdf' | 'docx' | 'image' | 'text';
 type TraceFlow = 'rubric' | 'submission';
@@ -30,6 +21,7 @@ export interface ProcessedRubricDocument {
   context: string;
   sourceKind: SourceKind;
   pageCount: number;
+  fileData?: FileData;
 }
 
 export interface ProcessedSubmissionDocument {
@@ -37,6 +29,7 @@ export interface ProcessedSubmissionDocument {
   markdown: string;
   sourceKind: SourceKind;
   pageCount: number;
+  fileData?: FileData;
 }
 
 const createTrace = (flow: TraceFlow, fileName: string, enabled: boolean): ProcessingTrace => ({
@@ -72,104 +65,43 @@ const readAsDataUrl = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
-const fileToBase64 = async (file: File): Promise<string> => {
+const toFileData = async (file: File): Promise<FileData> => {
   const dataUrl = await readAsDataUrl(file);
   const [, base64 = ''] = dataUrl.split(',');
-  if (!base64) throw new Error(`Could not encode ${file.name} as base64.`);
-  return base64;
-};
 
-const runOcrForImage = async (
-  imageBase64: string,
-  trace?: ProcessingTrace,
-  pageNumber?: number,
-  totalPages?: number
-): Promise<string> => {
-  const pageLabel = pageNumber && totalPages ? `page ${pageNumber}/${totalPages}` : 'single image';
-  traceLog(trace, 'ocr.request.start', `Sending API request to DeepSeek OCR for ${pageLabel}.`);
-
-  const response = await fetch(OLLAMA_API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: OCR_MODEL,
-      stream: false,
-      messages: [
-        {
-          role: 'user',
-          content: OCR_PROMPT,
-          images: [imageBase64],
-        },
-      ],
-    }),
-  });
-
-  if (!response.ok) {
-    traceLog(trace, 'ocr.request.error', `DeepSeek OCR request failed with status ${response.status}.`);
-    throw new Error(`OCR request failed: ${response.status} ${response.statusText}`);
-  }
-  traceLog(trace, 'ocr.request.success', `DeepSeek OCR responded successfully for ${pageLabel}.`);
-
-  const data = (await response.json()) as OllamaOcrResponse;
-  const extractedText = (data.message?.content || '').trim();
-  traceLog(trace, 'ocr.extract.success', `OCR text extracted for ${pageLabel} (${extractedText.length} chars).`);
-  return extractedText;
-};
-
-const flattenImagePagesToMarkdown = async (
-  pages: string[],
-  trace?: ProcessingTrace
-): Promise<string> => {
-  const pageMarkdown: string[] = [];
-  traceLog(trace, 'ocr.batch.start', `Starting OCR over ${pages.length} page image(s).`);
-
-  for (let index = 0; index < pages.length; index += 1) {
-    const pageNumber = index + 1;
-    traceLog(trace, 'ocr.page.start', `Starting OCR for page ${pageNumber}/${pages.length}.`);
-    const pageResult = await runOcrForImage(pages[index], trace, pageNumber, pages.length);
-    const header = pages.length > 1 ? `<!-- Page ${index + 1} -->\n` : '';
-    pageMarkdown.push(`${header}${pageResult}`.trim());
-    traceLog(trace, 'ocr.page.success', `Completed OCR for page ${pageNumber}/${pages.length}.`);
+  if (!base64) {
+    throw new Error(`Could not encode ${file.name} as base64.`);
   }
 
-  traceLog(trace, 'ocr.batch.success', 'Completed OCR for all image pages.');
-  return pageMarkdown.join('\n\n');
+  return {
+    data: base64,
+    mimeType: file.type || 'application/octet-stream',
+  };
 };
-
-const convertPdfToImagePages = async (file: File, trace?: ProcessingTrace): Promise<string[]> => {
-  traceLog(trace, 'pdf.load.start', 'Loading PDF and preparing page-to-image conversion.');
+const extractTextFromPdf = async (file: File, trace?: ProcessingTrace): Promise<{ markdown: string; pageCount: number }> => {
+  traceLog(trace, 'pdf.load.start', 'Loading PDF and extracting text from each page.');
   const pdfBytes = await file.arrayBuffer();
   const pdf = await getDocument({ data: pdfBytes }).promise;
-  const imagePages: string[] = [];
+  const pageBlocks: string[] = [];
   traceLog(trace, 'pdf.load.success', `PDF loaded with ${pdf.numPages} page(s).`);
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    traceLog(trace, 'pdf.page.render.start', `Rendering page ${pageNumber}/${pdf.numPages} to image.`);
+    traceLog(trace, 'pdf.page.extract.start', `Extracting text from page ${pageNumber}/${pdf.numPages}.`);
     const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 2 });
-    const canvas = document.createElement('canvas');
-    const canvasContext = canvas.getContext('2d');
-
-    if (!canvasContext) {
-      throw new Error('Unable to initialize canvas rendering context for PDF conversion.');
-    }
-
-    canvas.width = Math.ceil(viewport.width);
-    canvas.height = Math.ceil(viewport.height);
-
-    await page.render({ canvas, canvasContext, viewport }).promise;
-
-    const dataUrl = canvas.toDataURL('image/png');
-    const [, base64 = ''] = dataUrl.split(',');
-    if (!base64) {
-      throw new Error(`Failed to convert PDF page ${pageNumber} into an image.`);
-    }
-    imagePages.push(base64);
-    traceLog(trace, 'pdf.page.render.success', `Converted page ${pageNumber}/${pdf.numPages} to image.`);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items
+      .map((item) => ('str' in item ? item.str : ''))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const header = pdf.numPages > 1 ? `<!-- Page ${pageNumber} -->\n` : '';
+    pageBlocks.push(`${header}${pageText}`.trim());
+    traceLog(trace, 'pdf.page.extract.success', `Extracted ${pageText.length} chars from page ${pageNumber}/${pdf.numPages}.`);
   }
 
-  traceLog(trace, 'pdf.convert.success', `PDF converted to ${imagePages.length} image page(s).`);
-  return imagePages;
+  const markdown = pageBlocks.join('\n\n').trim();
+  traceLog(trace, 'pdf.extract.success', `PDF text extraction complete (${markdown.length} chars).`);
+  return { markdown, pageCount: pdf.numPages };
 };
 
 const convertDocxToText = async (file: File, trace?: ProcessingTrace): Promise<string> => {
@@ -196,7 +128,9 @@ const formatRubricContext = (markdown: string, sourceKind: SourceKind, pageCount
     `This rubric was extracted from a ${sourceDescription}.`,
     sourceKind === 'docx' || sourceKind === 'text'
       ? 'Formatting: plain extracted text from the source document.'
-      : 'Formatting: OCR markdown generated by deepseek-ocr:latest, which may include HTML-like blocks.',
+      : sourceKind === 'pdf'
+        ? 'Formatting: PDF text-layer extraction (no OCR preprocessing).'
+        : 'Formatting: image source retained for multimodal grading; no pre-extraction performed.',
     '',
     'Rubric content:',
     markdown.trim(),
@@ -223,7 +157,9 @@ const formatSubmissionContext = (
     `Source type: ${sourceDescription}`,
     sourceKind === 'docx' || sourceKind === 'text'
       ? 'Formatting: extracted plain text.'
-      : 'Formatting: OCR markdown generated by deepseek-ocr:latest.',
+      : sourceKind === 'pdf'
+        ? 'Formatting: PDF text-layer extraction (no OCR preprocessing).'
+        : 'Formatting: image source retained for multimodal grading; no pre-extraction performed.',
     '',
     markdown.trim(),
   ].join('\n');
@@ -235,11 +171,10 @@ const extractMarkdownFromFile = async (
 ): Promise<{ markdown: string; sourceKind: SourceKind; pageCount: number }> => {
   traceLog(trace, 'extract.start', `Starting extraction for mime type: ${file.type || 'unknown'}.`);
   if (isPdfFile(file)) {
-    traceLog(trace, 'path.select', 'Detected PDF input. Route: PDF -> images -> DeepSeek OCR.');
-    const imagePages = await convertPdfToImagePages(file, trace);
-    const markdown = await flattenImagePagesToMarkdown(imagePages, trace);
+    traceLog(trace, 'path.select', 'Detected PDF input. Route: direct PDF text extraction.');
+    const { markdown, pageCount } = await extractTextFromPdf(file, trace);
     traceLog(trace, 'extract.success', `PDF extraction complete (${markdown.length} chars).`);
-    return { markdown, sourceKind: 'pdf', pageCount: imagePages.length };
+    return { markdown, sourceKind: 'pdf', pageCount };
   }
 
   if (isDocxFile(file)) {
@@ -250,11 +185,9 @@ const extractMarkdownFromFile = async (
   }
 
   if (isImageFile(file)) {
-    traceLog(trace, 'path.select', 'Detected image input. Route: image -> DeepSeek OCR.');
-    const imageBase64 = await fileToBase64(file);
-    traceLog(trace, 'image.encode.success', 'Image encoded to base64 for OCR request.');
-    const markdown = await flattenImagePagesToMarkdown([imageBase64], trace);
-    traceLog(trace, 'extract.success', `Image OCR extraction complete (${markdown.length} chars).`);
+    traceLog(trace, 'path.select', 'Detected image input. Route: preserve image for final multimodal grading (no preprocessing).');
+    const markdown = 'Image document uploaded. Text extraction was intentionally skipped so the final grading model can evaluate the attachment directly.';
+    traceLog(trace, 'extract.success', `Image preprocessing skipped (${markdown.length} chars of metadata context).`);
     return { markdown, sourceKind: 'image', pageCount: 1 };
   }
 
@@ -291,6 +224,7 @@ export const processRubricUpload = async (file: File): Promise<ProcessedRubricDo
     sourceKind,
     pageCount,
     context,
+    fileData: sourceKind === 'image' ? await toFileData(file) : undefined,
   };
 };
 
@@ -307,5 +241,6 @@ export const processSubmissionUpload = async (file: File): Promise<ProcessedSubm
     sourceKind,
     pageCount,
     content: formatSubmissionContext(file.name, markdown, sourceKind, pageCount),
+    fileData: sourceKind === 'image' ? await toFileData(file) : undefined,
   };
 };

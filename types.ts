@@ -53,6 +53,7 @@ export interface GradingConfig {
   prompt: string;
   rubric: RubricCriterion[];
   rubricContext: string;
+  rubricFileData?: FileData;
   gradeLevel: GradeLevel;
   feedbackStyle: FeedbackStyle;
   autoInsertFeedback: boolean;
