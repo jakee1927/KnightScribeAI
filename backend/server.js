@@ -28,14 +28,14 @@ app.use(express.json({ limit: '50mb' }));
 
 const BACKEND_PORT = Number(process.env.BACKEND_PORT || 4000);
 const OPENWEBUI_BASE_URL = (process.env.OPENWEBUI_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');
-const OPENWEBUI_API_KEY = process.env.OPENWEBUI_API_KEY || '';
+const OPENWEBUI_JWT_TOKEN = process.env.OPENWEBUI_JWT_TOKEN || '';
 const DEFAULT_CHAT_MODEL = process.env.OPENWEBUI_MODEL || 'gemma3:12b';
 const DEFAULT_OCR_MODEL = process.env.OPENWEBUI_OCR_MODEL || 'deepseek-ocr:latest';
 
-const requireOpenWebUiApiKey = (res) => {
-  if (OPENWEBUI_API_KEY) return true;
+const requireOpenWebUiJwtToken = (res) => {
+  if (OPENWEBUI_JWT_TOKEN) return true;
   res.status(500).json({
-    error: 'OPENWEBUI_API_KEY is not configured on the backend.',
+    error: 'OPENWEBUI_JWT_TOKEN is not configured on the backend.',
   });
   return false;
 };
@@ -101,7 +101,7 @@ const callOpenWebUiChatCompletions = async ({
   const response = await fetch(`${OPENWEBUI_BASE_URL}/api/chat/completions`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${OPENWEBUI_API_KEY}`,
+      Authorization: `Bearer ${OPENWEBUI_JWT_TOKEN}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
@@ -123,12 +123,12 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     openWebUiBaseUrl: OPENWEBUI_BASE_URL,
-    hasApiKey: Boolean(OPENWEBUI_API_KEY),
+    hasJwtToken: Boolean(OPENWEBUI_JWT_TOKEN),
   });
 });
 
 app.post('/api/chat', async (req, res) => {
-  if (!requireOpenWebUiApiKey(res)) return;
+  if (!requireOpenWebUiJwtToken(res)) return;
 
   try {
     const { model, messages, jsonFormat, temperature } = req.body || {};
@@ -152,7 +152,7 @@ app.post('/api/chat', async (req, res) => {
 });
 
 app.post('/api/ocr', async (req, res) => {
-  if (!requireOpenWebUiApiKey(res)) return;
+  if (!requireOpenWebUiJwtToken(res)) return;
 
   try {
     const { imageBase64, prompt, model } = req.body || {};

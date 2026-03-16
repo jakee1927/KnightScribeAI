@@ -1,6 +1,6 @@
 Just make an .env.local file
 
-OPENWEBUI_API_KEY=your_secret_key
+OPENWEBUI_JWT_TOKEN=your_jwt_token
 OPENWEBUI_BASE_URL=http://localhost:3000
 OPENWEBUI_MODEL=gemma3:12b
 OPENWEBUI_OCR_MODEL=deepseek-ocr:latest
