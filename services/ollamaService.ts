@@ -15,7 +15,17 @@ export const testOllamaConnection = async (): Promise<{ success: boolean; respon
     });
 
     if (!response.ok) {
-      return { success: false, error: `HTTP ${response.status}: ${response.statusText}` };
+      let backendError = '';
+      try {
+        const errData = await response.json();
+        backendError = errData?.error || '';
+      } catch {
+        // ignore JSON parse failure and fall back to status text
+      }
+      return {
+        success: false,
+        error: backendError || `HTTP ${response.status}: ${response.statusText}`,
+      };
     }
 
     const data = await response.json();

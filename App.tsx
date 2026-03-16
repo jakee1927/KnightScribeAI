@@ -204,7 +204,7 @@ const App: React.FC = () => {
               {testResult.status === 'loading' ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
               {testResult.status === 'loading' ? 'Testing...' :
                testResult.status === 'success' ? 'Connected!' :
-               testResult.status === 'error' ? 'Failed' : 'Test API'}
+               testResult.status === 'error' ? 'Failed' : 'Test OpenWebUI'}
             </button>
             <nav className="hidden md:flex items-center bg-slate-50 p-1 rounded-lg border border-slate-200">
               <button onClick={() => setStep(1)} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${step === 1 ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
