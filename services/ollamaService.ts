@@ -1,16 +1,16 @@
 import { GradingConfig, GradeResult, RubricCriterion, Submission, FeedbackStyle } from "../types";
 
-const OLLAMA_API_URL = '/ollama/api/chat';
+const OPENWEBUI_BACKEND_CHAT_URL = '/backend/api/chat';
 
 export const testOllamaConnection = async (): Promise<{ success: boolean; response?: string; error?: string }> => {
   try {
-    const response = await fetch(OLLAMA_API_URL, {
+    const response = await fetch(OPENWEBUI_BACKEND_CHAT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gemma3:12b',
-        messages: [{ role: 'user', content: 'Say "Hello from Ollama!" in exactly 5 words.' }],
-        stream: false,
+        model: 'gemma3:4b',
+        messages: [{ role: 'user', content: 'Say "Hello from OpenWebUI!" in exactly 5 words.' }],
+        jsonFormat: false,
       }),
     });
 
@@ -19,7 +19,7 @@ export const testOllamaConnection = async (): Promise<{ success: boolean; respon
     }
 
     const data = await response.json();
-    return { success: true, response: data.message.content };
+    return { success: true, response: data.content };
   } catch (err: any) {
     return { success: false, error: err.message || 'Unknown error' };
   }
@@ -32,18 +32,15 @@ interface OllamaMessage {
   images?: string[];
 }
 
-interface OllamaRequest {
+interface OpenWebUIBackendRequest {
   model: string;
   messages: OllamaMessage[];
-  stream: boolean;
-  format?: 'json';
+  jsonFormat?: boolean;
 }
 
-interface OllamaResponse {
-  message: {
-    role: string;
-    content: string;
-  };
+interface OpenWebUIBackendResponse {
+  content: string;
+  error?: string;
 }
 
 const toFiniteNumber = (value: unknown, fallback: number): number => {
@@ -140,17 +137,13 @@ const callOllama = async (
   messages: OllamaMessage[],
   jsonFormat: boolean = false
 ): Promise<string> => {
-  const payload: OllamaRequest = {
+  const payload: OpenWebUIBackendRequest = {
     model: MODEL_NAME,
     messages,
-    stream: false,
+    jsonFormat,
   };
 
-  if (jsonFormat) {
-    payload.format = 'json';
-  }
-
-  const response = await fetch(OLLAMA_API_URL, {
+  const response = await fetch(OPENWEBUI_BACKEND_CHAT_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -159,11 +152,12 @@ const callOllama = async (
   });
 
   if (!response.ok) {
-    throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+    const errorBody = await response.text();
+    throw new Error(`OpenWebUI backend error: ${response.status} ${errorBody || response.statusText}`);
   }
 
-  const data: OllamaResponse = await response.json();
-  return data.message.content;
+  const data: OpenWebUIBackendResponse = await response.json();
+  return data.content;
 };
 
 const getFeedbackInstruction = (style: FeedbackStyle): string => {
@@ -274,23 +268,27 @@ export const gradeSubmission = async (
     throw new Error('No rubric data provided. Add rubric criteria or upload a rubric document.');
   }
 
-  const structuredRubricBlock = hasStructuredRubric
-    ? config.rubric.map(c => `- [ID: ${c.id}] ${c.name} (Max ${c.maxPoints} pts): ${c.description}`).join('\n')
-    : 'No manually structured rubric criteria were provided.';
+  const rubricParts: string[] = [];
+  if (hasStructuredRubric) {
+    rubricParts.push(
+      config.rubric
+        .map(c => `- [ID: ${c.id}] ${c.name} (Max ${c.maxPoints} pts): ${c.description}`)
+        .join('\n')
+    );
+  }
+  if (hasRubricContext) {
+    rubricParts.push(config.rubricContext);
+  }
+  const rubricBlock = rubricParts.join('\n\n').trim();
 
-  const uploadedRubricBlock = hasRubricContext
-    ? `\nUploaded rubric reference:\n${config.rubricContext}`
-    : '';
+  const studentWork = submission.url
+    ? `Submission URL: ${submission.url}\n\n${submission.content || ''}`
+    : submission.content || (submission.fileData ? '[Image submission attached in legacy mode.]' : '');
   
   const systemPrompt = `You are a professional academic grader. 
 Target Grade Level: ${config.gradeLevel}
 Assignment Prompt: ${config.prompt}
-Feedback Style: ${styleInstruction}
-
-Grading Standards:
-${structuredRubricBlock}${uploadedRubricBlock}
-
-If an uploaded rubric reference is present, treat it as full-fidelity rubric text and honor all grading details it contains.
+You must grade strictly using the rubric provided by the user.
 
 You MUST respond with valid JSON in this exact format:
 ${GRADE_RESULT_JSON_SCHEMA}
@@ -301,27 +299,20 @@ Critical scoring rule:
 
 The output must be strictly valid JSON with no additional text.`;
 
-  const messages: OllamaMessage[] = [
-    { role: 'system', content: systemPrompt }
-  ];
+  const finalPrompt = `Rubric:
+${rubricBlock}
 
-  if (submission.url) {
-    messages.push({
-      role: 'user',
-      content: `Grade the student submission at ${submission.url}.`
-    });
-  } else if (submission.fileData) {
-    messages.push({
-      role: 'user',
-      content: 'Grade this student submission.',
-      images: [submission.fileData.data]
-    });
-  } else {
-    messages.push({
-      role: 'user',
-      content: `Student Submission Content:\n\n${submission.content}`
-    });
-  }
+Grading Type:
+${config.feedbackStyle}
+${styleInstruction}
+
+Student Work:
+${studentWork}`;
+
+  const messages: OllamaMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: finalPrompt },
+  ];
 
   const responseText = await callOllama(messages, true);
   
@@ -336,8 +327,8 @@ export const insertFeedbackIntoDoc = async (
   submission: Submission,
   result: GradeResult
 ): Promise<boolean> => {
-  // Ollama/Gemma3 cannot directly insert into Google Docs
+  // This grading path cannot directly insert into Google Docs.
   // This would require a separate Google Docs API integration
-  console.warn('insertFeedbackIntoDoc is not supported with Ollama. Use Google Docs API separately.');
+  console.warn('insertFeedbackIntoDoc is not supported in this backend. Use Google Docs API separately.');
   return false;
 };

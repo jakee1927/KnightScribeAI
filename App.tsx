@@ -199,7 +199,7 @@ const App: React.FC = () => {
                 testResult.status === 'loading' ? 'bg-amber-50 border-amber-300 text-amber-700' :
                 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
               }`}
-              title={testResult.message || 'Test Ollama API connection'}
+              title={testResult.message || 'Test OpenWebUI API connection'}
             >
               {testResult.status === 'loading' ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
               {testResult.status === 'loading' ? 'Testing...' :

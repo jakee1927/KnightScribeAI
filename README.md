@@ -15,6 +15,11 @@ View your app in AI Studio: https://ai.studio/apps/drive/1MiLIa-oinOjjVrBpFtb915
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Create `.env.local` (or export env vars) with:
+   - `OPENWEBUI_API_KEY=...` (required)
+   - `OPENWEBUI_BASE_URL=http://localhost:3000` (or your OpenWebUI host)
+   - `OPENWEBUI_MODEL=gemma3:12b` (optional)
+   - `OPENWEBUI_OCR_MODEL=deepseek-ocr:latest` (optional)
+3. (Optional) Keep `GEMINI_API_KEY` if you still use Gemini-specific code paths.
+4. Run the app:
    `npm run dev`

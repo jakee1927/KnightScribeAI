@@ -9,10 +9,10 @@ export default defineConfig(({ mode }) => {
         port: 3000,
         host: '0.0.0.0',
         proxy: {
-          '/ollama': {
-            target: 'http://localhost:11434',
+          '/backend': {
+            target: 'http://localhost:4000',
             changeOrigin: true,
-            rewrite: (path) => path.replace(/^\/ollama/, '')
+            rewrite: (path) => path.replace(/^\/backend/, '')
           }
         }
       },

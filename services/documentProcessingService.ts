@@ -1,7 +1,7 @@
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import * as mammoth from 'mammoth';
 
-const OLLAMA_API_URL = '/ollama/api/chat';
+const OPENWEBUI_OCR_API_URL = '/backend/api/ocr';
 const OCR_MODEL = 'deepseek-ocr:latest';
 const OCR_PROMPT = '<image>\n<|grounding|>Convert the document to markdown.';
 
@@ -11,9 +11,8 @@ GlobalWorkerOptions.workerSrc = new URL(
 ).toString();
 
 interface OllamaOcrResponse {
-  message?: {
-    content?: string;
-  };
+  content?: string;
+  error?: string;
 }
 
 type SourceKind = 'pdf' | 'docx' | 'image' | 'text';
@@ -88,19 +87,13 @@ const runOcrForImage = async (
   const pageLabel = pageNumber && totalPages ? `page ${pageNumber}/${totalPages}` : 'single image';
   traceLog(trace, 'ocr.request.start', `Sending API request to DeepSeek OCR for ${pageLabel}.`);
 
-  const response = await fetch(OLLAMA_API_URL, {
+  const response = await fetch(OPENWEBUI_OCR_API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: OCR_MODEL,
-      stream: false,
-      messages: [
-        {
-          role: 'user',
-          content: OCR_PROMPT,
-          images: [imageBase64],
-        },
-      ],
+      prompt: OCR_PROMPT,
+      imageBase64,
     }),
   });
 
@@ -111,7 +104,7 @@ const runOcrForImage = async (
   traceLog(trace, 'ocr.request.success', `DeepSeek OCR responded successfully for ${pageLabel}.`);
 
   const data = (await response.json()) as OllamaOcrResponse;
-  const extractedText = (data.message?.content || '').trim();
+  const extractedText = (data.content || '').trim();
   traceLog(trace, 'ocr.extract.success', `OCR text extracted for ${pageLabel} (${extractedText.length} chars).`);
   return extractedText;
 };
