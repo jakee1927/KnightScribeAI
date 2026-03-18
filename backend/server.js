@@ -81,6 +81,78 @@ const extractAssistantContent = (responseJson) => {
   return '';
 };
 
+const extractContentParts = (content) => {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part?.text === 'string') return part.text;
+        if (typeof part?.content === 'string') return part.content;
+        return '';
+      })
+      .join('\n')
+      .trim();
+  }
+
+  return '';
+};
+
+const parseSseResponseBody = (rawBody) => {
+  const dataPayloads = rawBody
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .filter((line) => line && line !== '[DONE]');
+
+  if (dataPayloads.length === 0) {
+    throw new Error('OpenWebUI returned an SSE response without any data payloads.');
+  }
+
+  const parsedEvents = dataPayloads.map((payload) => JSON.parse(payload));
+  const mergedContent = parsedEvents
+    .map((event) => {
+      const choice = event?.choices?.[0];
+      return extractContentParts(choice?.delta?.content ?? choice?.message?.content);
+    })
+    .join('');
+
+  const lastEvent = parsedEvents[parsedEvents.length - 1];
+  return {
+    ...lastEvent,
+    choices: [
+      {
+        ...(lastEvent?.choices?.[0] || {}),
+        message: {
+          role: 'assistant',
+          content: mergedContent,
+        },
+      },
+    ],
+  };
+};
+
+const parseOpenWebUiResponseBody = (rawBody) => {
+  const trimmed = rawBody.trim();
+
+  if (!trimmed) {
+    throw new Error('OpenWebUI returned an empty response body.');
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    if (trimmed.startsWith('data:')) {
+      return parseSseResponseBody(trimmed);
+    }
+
+    throw new Error(`Unsupported OpenWebUI response format: ${trimmed.slice(0, 120)}`);
+  }
+};
+
 const callOpenWebUiChatCompletions = async ({
   model,
   messages,
@@ -102,6 +174,7 @@ const callOpenWebUiChatCompletions = async ({
     method: 'POST',
     headers: {
       Authorization: `Bearer ${OPENWEBUI_JWT_TOKEN}`,
+      Accept: 'application/json, text/event-stream',
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
@@ -112,7 +185,8 @@ const callOpenWebUiChatCompletions = async ({
     throw new Error(`OpenWebUI API error (${response.status}): ${errorText || response.statusText}`);
   }
 
-  const responseJson = await response.json();
+  const rawBody = await response.text();
+  const responseJson = parseOpenWebUiResponseBody(rawBody);
   return {
     content: extractAssistantContent(responseJson),
     raw: responseJson,

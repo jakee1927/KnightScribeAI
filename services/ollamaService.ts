@@ -8,7 +8,6 @@ export const testOllamaConnection = async (): Promise<{ success: boolean; respon
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gemma3:4b',
         messages: [{ role: 'user', content: 'Say "Hello from OpenWebUI!" in exactly 5 words.' }],
         jsonFormat: false,
       }),
