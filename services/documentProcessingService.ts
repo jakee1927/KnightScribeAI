@@ -113,17 +113,27 @@ const flattenImagePagesToMarkdown = async (
   pages: string[],
   trace?: ProcessingTrace
 ): Promise<string> => {
-  const pageMarkdown: string[] = [];
+  const pageMarkdown: string[] = new Array(pages.length);
   traceLog(trace, 'ocr.batch.start', `Starting OCR over ${pages.length} page image(s).`);
 
-  for (let index = 0; index < pages.length; index += 1) {
-    const pageNumber = index + 1;
-    traceLog(trace, 'ocr.page.start', `Starting OCR for page ${pageNumber}/${pages.length}.`);
-    const pageResult = await runOcrForImage(pages[index], trace, pageNumber, pages.length);
-    const header = pages.length > 1 ? `<!-- Page ${index + 1} -->\n` : '';
-    pageMarkdown.push(`${header}${pageResult}`.trim());
-    traceLog(trace, 'ocr.page.success', `Completed OCR for page ${pageNumber}/${pages.length}.`);
-  }
+  const concurrency = Math.min(3, pages.length);
+  let cursor = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const currentIndex = cursor;
+      cursor += 1;
+      if (currentIndex >= pages.length) return;
+
+      const pageNumber = currentIndex + 1;
+      traceLog(trace, 'ocr.page.start', `Starting OCR for page ${pageNumber}/${pages.length}.`);
+      const pageResult = await runOcrForImage(pages[currentIndex], trace, pageNumber, pages.length);
+      const header = pages.length > 1 ? `<!-- Page ${pageNumber} -->\n` : '';
+      pageMarkdown[currentIndex] = `${header}${pageResult}`.trim();
+      traceLog(trace, 'ocr.page.success', `Completed OCR for page ${pageNumber}/${pages.length}.`);
+    }
+  });
+
+  await Promise.all(workers);
 
   traceLog(trace, 'ocr.batch.success', 'Completed OCR for all image pages.');
   return pageMarkdown.join('\n\n');

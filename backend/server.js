@@ -158,7 +158,9 @@ const callOpenWebUiChatCompletions = async ({
   messages,
   jsonFormat = false,
   temperature = 0.1,
+  includeRaw = false,
 }) => {
+  const startedAt = Date.now();
   const payload = {
     model: model || DEFAULT_CHAT_MODEL,
     messages: normalizeMessages(messages),
@@ -187,9 +189,11 @@ const callOpenWebUiChatCompletions = async ({
 
   const rawBody = await response.text();
   const responseJson = parseOpenWebUiResponseBody(rawBody);
+  const elapsedMs = Date.now() - startedAt;
   return {
     content: extractAssistantContent(responseJson),
-    raw: responseJson,
+    raw: includeRaw ? responseJson : undefined,
+    elapsedMs,
   };
 };
 
@@ -205,16 +209,18 @@ app.post('/api/chat', async (req, res) => {
   if (!requireOpenWebUiJwtToken(res)) return;
 
   try {
-    const { model, messages, jsonFormat, temperature } = req.body || {};
+    const { model, messages, jsonFormat, temperature, includeRaw } = req.body || {};
     const result = await callOpenWebUiChatCompletions({
       model: model || DEFAULT_CHAT_MODEL,
       messages: Array.isArray(messages) ? messages : [],
       jsonFormat: Boolean(jsonFormat),
       temperature: typeof temperature === 'number' ? temperature : 0.1,
+      includeRaw: Boolean(includeRaw),
     });
 
     res.json({
       content: result.content,
+      elapsedMs: result.elapsedMs,
       raw: result.raw,
     });
   } catch (error) {
@@ -229,7 +235,7 @@ app.post('/api/ocr', async (req, res) => {
   if (!requireOpenWebUiJwtToken(res)) return;
 
   try {
-    const { imageBase64, prompt, model } = req.body || {};
+    const { imageBase64, prompt, model, includeRaw } = req.body || {};
     if (!imageBase64 || typeof imageBase64 !== 'string') {
       res.status(400).json({ error: 'imageBase64 is required.' });
       return;
@@ -251,10 +257,12 @@ app.post('/api/ocr', async (req, res) => {
       ],
       jsonFormat: false,
       temperature: 0,
+      includeRaw: Boolean(includeRaw),
     });
 
     res.json({
       content: result.content,
+      elapsedMs: result.elapsedMs,
       raw: result.raw,
     });
   } catch (error) {

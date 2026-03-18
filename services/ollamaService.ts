@@ -8,8 +8,9 @@ export const testOllamaConnection = async (): Promise<{ success: boolean; respon
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: [{ role: 'user', content: 'Say "Hello from OpenWebUI!" in exactly 5 words.' }],
+        messages: [{ role: 'user', content: 'Say hi' }],
         jsonFormat: false,
+        temperature: 0,
       }),
     });
 
@@ -28,7 +29,8 @@ export const testOllamaConnection = async (): Promise<{ success: boolean; respon
     }
 
     const data = await response.json();
-    return { success: true, response: data.content };
+    const elapsedSuffix = typeof data.elapsedMs === 'number' ? ` (${data.elapsedMs} ms)` : '';
+    return { success: true, response: `${data.content}${elapsedSuffix}` };
   } catch (err: any) {
     return { success: false, error: err.message || 'Unknown error' };
   }
@@ -45,10 +47,13 @@ interface OpenWebUIBackendRequest {
   model: string;
   messages: OllamaMessage[];
   jsonFormat?: boolean;
+  temperature?: number;
+  includeRaw?: boolean;
 }
 
 interface OpenWebUIBackendResponse {
   content: string;
+  elapsedMs?: number;
   error?: string;
 }
 
@@ -144,12 +149,15 @@ const normalizeGradeResult = (
 
 const callOllama = async (
   messages: OllamaMessage[],
-  jsonFormat: boolean = false
+  jsonFormat: boolean = false,
+  temperature: number = 0.1
 ): Promise<string> => {
   const payload: OpenWebUIBackendRequest = {
     model: MODEL_NAME,
     messages,
     jsonFormat,
+    temperature,
+    includeRaw: false,
   };
 
   const response = await fetch(OPENWEBUI_BACKEND_CHAT_URL, {
@@ -239,7 +247,7 @@ ${rubricMarkdown}`
     }
   ];
 
-  const responseText = await callOllama(messages, true);
+  const responseText = await callOllama(messages, true, 0);
   const result = parseModelJson(responseText);
   const criteria = result.criteria || [];
   console.log(`[RubricExtraction][criteria.parse.success] Parsed ${criteria.length} rubric criteria from model response.`);
@@ -260,7 +268,7 @@ If the document doesn't specify points, default to 10.`
     }
   ];
 
-  const responseText = await callOllama(messages, true);
+  const responseText = await callOllama(messages, true, 0);
   const result = parseModelJson(responseText);
   return result.criteria;
 };
@@ -308,12 +316,18 @@ Critical scoring rule:
 
 The output must be strictly valid JSON with no additional text.`;
 
-  const finalPrompt = `Rubric:
+  const finalPrompt = `Assignment:
+${config.prompt}
+
+Rubric:
 ${rubricBlock}
 
 Grading Type:
 ${config.feedbackStyle}
 ${styleInstruction}
+
+Student Name:
+${submission.studentName}
 
 Student Work:
 ${studentWork}`;
@@ -323,7 +337,7 @@ ${studentWork}`;
     { role: 'user', content: finalPrompt },
   ];
 
-  const responseText = await callOllama(messages, true);
+  const responseText = await callOllama(messages, true, 0.1);
   
   if (!responseText) throw new Error("No response generated from AI.");
   const parsed = parseModelJson(responseText);
