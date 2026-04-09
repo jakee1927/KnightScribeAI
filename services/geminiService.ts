@@ -150,7 +150,7 @@ The output must be strictly valid JSON.`;
 
   if (submission.url) {
     contents.push(`Grade the student submission at ${submission.url}. ${config.autoInsertFeedback ? 'Use appendFeedbackToDoc to insert results if scoring is successful.' : ''}`);
-  } else if (submission.fileData) {
+  } else if (submission.fileData?.data) {
     contents.push(
       { inlineData: { data: submission.fileData.data, mimeType: submission.fileData.mimeType } },
       `Grade this student submission.`

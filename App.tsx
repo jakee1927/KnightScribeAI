@@ -79,11 +79,7 @@ const App: React.FC = () => {
     feedbackStyle: 'scoring_with_feedback',
     autoInsertFeedback: false,
     rubricContext: '',
-    rubric: [
-      { id: '1', name: 'Structure', description: 'Logical flow and paragraph organization.', maxPoints: 10 },
-      { id: '2', name: 'Clarity', description: 'Precision of language and lack of ambiguity.', maxPoints: 10 },
-      { id: '3', name: 'Argument', description: 'Strength of evidence and persuasive logic.', maxPoints: 10 },
-    ],
+    rubric: [],
   });
   const [submissions, setSubmissions] = useState<Submission[]>([]);
 
@@ -327,9 +323,11 @@ const App: React.FC = () => {
               <section className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                 <RubricEditor
                   rubric={config.rubric}
-                  setRubric={(r) => setConfig({ ...config, rubric: r })}
+                  setRubric={(r) => setConfig((prev) => ({ ...prev, rubric: r }))}
                   rubricContext={config.rubricContext}
-                  setRubricContext={(context) => setConfig({ ...config, rubricContext: context })}
+                  setRubricContext={(context) => setConfig((prev) => ({ ...prev, rubricContext: context }))}
+                  rubricFile={config.rubricFile}
+                  setRubricFile={(file) => setConfig((prev) => ({ ...prev, rubricFile: file }))}
                 />
               </section>
 

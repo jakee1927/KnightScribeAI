@@ -27,17 +27,33 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 const BACKEND_PORT = Number(process.env.BACKEND_PORT || 4000);
-const OPENWEBUI_BASE_URL = (process.env.OPENWEBUI_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');
+const OPENWEBUI_BASE_URL = (process.env.OPENWEBUI_BASE_URL || '').replace(/\/+$/, '');
 const OPENWEBUI_JWT_TOKEN = process.env.OPENWEBUI_JWT_TOKEN || '';
-const DEFAULT_CHAT_MODEL = process.env.OPENWEBUI_MODEL || 'gemma3:12b';
-const DEFAULT_OCR_MODEL = process.env.OPENWEBUI_OCR_MODEL || 'deepseek-ocr:latest';
+const OPENWEBUI_MODEL = process.env.OPENWEBUI_MODEL || '';
 
-const requireOpenWebUiJwtToken = (res) => {
-  if (OPENWEBUI_JWT_TOKEN) return true;
-  res.status(500).json({
-    error: 'OPENWEBUI_JWT_TOKEN is not configured on the backend.',
-  });
-  return false;
+const requireOpenWebUiConfig = (res) => {
+  if (!OPENWEBUI_BASE_URL) {
+    res.status(500).json({
+      error: 'OPENWEBUI_BASE_URL is not configured on the backend.',
+    });
+    return false;
+  }
+
+  if (!OPENWEBUI_JWT_TOKEN) {
+    res.status(500).json({
+      error: 'OPENWEBUI_JWT_TOKEN is not configured on the backend.',
+    });
+    return false;
+  }
+
+  if (!OPENWEBUI_MODEL) {
+    res.status(500).json({
+      error: 'OPENWEBUI_MODEL is not configured on the backend.',
+    });
+    return false;
+  }
+
+  return true;
 };
 
 const normalizeMessages = (messages = []) =>
@@ -154,7 +170,6 @@ const parseOpenWebUiResponseBody = (rawBody) => {
 };
 
 const callOpenWebUiChatCompletions = async ({
-  model,
   messages,
   jsonFormat = false,
   temperature = 0.1,
@@ -162,7 +177,7 @@ const callOpenWebUiChatCompletions = async ({
 }) => {
   const startedAt = Date.now();
   const payload = {
-    model: model || DEFAULT_CHAT_MODEL,
+    model: OPENWEBUI_MODEL,
     messages: normalizeMessages(messages),
     temperature,
     stream: false,
@@ -202,16 +217,16 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     openWebUiBaseUrl: OPENWEBUI_BASE_URL,
     hasJwtToken: Boolean(OPENWEBUI_JWT_TOKEN),
+    model: OPENWEBUI_MODEL || null,
   });
 });
 
 app.post('/api/chat', async (req, res) => {
-  if (!requireOpenWebUiJwtToken(res)) return;
+  if (!requireOpenWebUiConfig(res)) return;
 
   try {
-    const { model, messages, jsonFormat, temperature, includeRaw } = req.body || {};
+    const { messages, jsonFormat, temperature, includeRaw } = req.body || {};
     const result = await callOpenWebUiChatCompletions({
-      model: model || DEFAULT_CHAT_MODEL,
       messages: Array.isArray(messages) ? messages : [],
       jsonFormat: Boolean(jsonFormat),
       temperature: typeof temperature === 'number' ? temperature : 0.1,
@@ -232,48 +247,13 @@ app.post('/api/chat', async (req, res) => {
 });
 
 app.post('/api/ocr', async (req, res) => {
-  if (!requireOpenWebUiJwtToken(res)) return;
-
-  try {
-    const { imageBase64, prompt, model, includeRaw } = req.body || {};
-    if (!imageBase64 || typeof imageBase64 !== 'string') {
-      res.status(400).json({ error: 'imageBase64 is required.' });
-      return;
-    }
-
-    const ocrPrompt =
-      typeof prompt === 'string' && prompt.trim().length > 0
-        ? prompt
-        : '<image>\n<|grounding|>Convert the document to markdown.';
-
-    const result = await callOpenWebUiChatCompletions({
-      model: typeof model === 'string' && model.trim() ? model.trim() : DEFAULT_OCR_MODEL,
-      messages: [
-        {
-          role: 'user',
-          content: ocrPrompt,
-          images: [imageBase64],
-        },
-      ],
-      jsonFormat: false,
-      temperature: 0,
-      includeRaw: Boolean(includeRaw),
-    });
-
-    res.json({
-      content: result.content,
-      elapsedMs: result.elapsedMs,
-      raw: result.raw,
-    });
-  } catch (error) {
-    console.error('[backend/api/ocr] OCR request failed:', error);
-    res.status(500).json({
-      error: error instanceof Error ? error.message : 'Unknown OCR backend error',
-    });
-  }
+  res.status(410).json({
+    error: 'OCR endpoint is disabled. Upload preprocessing now happens client-side, and /api/chat is used for staged model calls.',
+  });
 });
 
 app.listen(BACKEND_PORT, () => {
   console.log(`[backend] OpenWebUI proxy listening on http://localhost:${BACKEND_PORT}`);
   console.log(`[backend] OpenWebUI base URL: ${OPENWEBUI_BASE_URL}`);
+  console.log(`[backend] Forced model from OPENWEBUI_MODEL: ${OPENWEBUI_MODEL || '(not configured)'}`);
 });

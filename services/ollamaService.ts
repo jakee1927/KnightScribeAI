@@ -35,8 +35,6 @@ export const testOllamaConnection = async (): Promise<{ success: boolean; respon
     return { success: false, error: err.message || 'Unknown error' };
   }
 };
-const MODEL_NAME = 'gemma3:12b';
-
 interface OllamaMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -44,7 +42,7 @@ interface OllamaMessage {
 }
 
 interface OpenWebUIBackendRequest {
-  model: string;
+  model?: string;
   messages: OllamaMessage[];
   jsonFormat?: boolean;
   temperature?: number;
@@ -64,6 +62,12 @@ const toFiniteNumber = (value: unknown, fallback: number): number => {
 
 const clampScore = (score: number, maxPoints: number): number =>
   Math.min(Math.max(score, 0), maxPoints);
+
+const truncateForPrompt = (value: string, maxChars: number): string => {
+  const normalized = value.trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars)}\n\n[Truncated to stay within prompt budget.]`;
+};
 
 const parseModelJson = (raw: string): any => {
   const trimmed = raw.trim();
@@ -153,7 +157,6 @@ const callOllama = async (
   temperature: number = 0.1
 ): Promise<string> => {
   const payload: OpenWebUIBackendRequest = {
-    model: MODEL_NAME,
     messages,
     jsonFormat,
     temperature,
@@ -220,7 +223,7 @@ const GRADE_RESULT_JSON_SCHEMA = `{
 export const parseRubricFromMarkdown = async (
   rubricMarkdown: string
 ): Promise<RubricCriterion[]> => {
-  console.log(`[RubricExtraction][criteria.parse.start] Sending extracted OCR/text to ${MODEL_NAME} for rubric JSON parsing (${rubricMarkdown.length} chars).`);
+  console.log(`[RubricExtraction][criteria.parse.start] Sending extracted text to configured backend model for rubric JSON parsing (${rubricMarkdown.length} chars).`);
   const messages: OllamaMessage[] = [
     {
       role: 'system',
@@ -277,60 +280,76 @@ export const gradeSubmission = async (
   config: GradingConfig,
   submission: Submission
 ): Promise<{ result: GradeResult; feedbackInserted: boolean }> => {
+  const assignmentPrompt = truncateForPrompt(config.prompt || '', 4000);
+  const rubricContext = truncateForPrompt(config.rubricContext || '', 6000);
+  const submissionContent = truncateForPrompt(submission.content || '', 14000);
+  const compactRubric = config.rubric.map((criterion) => ({
+    id: criterion.id,
+    name: truncateForPrompt(criterion.name || '', 200),
+    description: truncateForPrompt(criterion.description || '', 1200),
+    maxPoints: criterion.maxPoints,
+  }));
+
   const styleInstruction = getFeedbackInstruction(config.feedbackStyle);
-  const hasStructuredRubric = config.rubric.length > 0;
-  const hasRubricContext = !!config.rubricContext?.trim();
+  const hasStructuredRubric = compactRubric.length > 0;
+  const hasRubricContext = rubricContext.length > 0;
 
   if (!hasStructuredRubric && !hasRubricContext) {
-    throw new Error('No rubric data provided. Add rubric criteria or upload a rubric document.');
+    throw new Error('No usable rubric data found. Upload and parse a rubric, or add criteria/context manually.');
   }
 
-  const rubricParts: string[] = [];
-  if (hasStructuredRubric) {
-    rubricParts.push(
-      config.rubric
-        .map(c => `- [ID: ${c.id}] ${c.name} (Max ${c.maxPoints} pts): ${c.description}`)
-        .join('\n')
-    );
-  }
-  if (hasRubricContext) {
-    rubricParts.push(config.rubricContext);
-  }
-  const rubricBlock = rubricParts.join('\n\n').trim();
-
-  const studentWork = submission.url
-    ? `Submission URL: ${submission.url}\n\n${submission.content || ''}`
-    : submission.content || (submission.fileData ? '[Image submission attached in legacy mode.]' : '');
+  const gradingPayload = {
+    assignmentPrompt,
+    gradeLevel: config.gradeLevel,
+    feedbackStyle: config.feedbackStyle,
+    feedbackStyleInstruction: styleInstruction,
+    rubric: {
+      criteria: compactRubric,
+      context: hasRubricContext ? rubricContext : undefined,
+      source: config.rubricFile
+        ? {
+            name: config.rubricFile.name || 'uploaded-rubric',
+            mimeType: config.rubricFile.mimeType || 'application/octet-stream',
+            sizeBytes: config.rubricFile.sizeBytes,
+          }
+        : undefined,
+    },
+    submission: {
+      studentName: submission.studentName,
+      url: submission.url,
+      content: submissionContent,
+      source: submission.fileData
+        ? {
+            name: submission.fileData.name || 'uploaded-submission',
+            mimeType: submission.fileData.mimeType || 'application/octet-stream',
+            sizeBytes: submission.fileData.sizeBytes,
+          }
+        : undefined,
+    },
+  };
   
   const systemPrompt = `You are a professional academic grader. 
-Target Grade Level: ${config.gradeLevel}
-Assignment Prompt: ${config.prompt}
-You must grade strictly using the rubric provided by the user.
+You must grade strictly using the rubric information provided in the JSON payload.
 
 You MUST respond with valid JSON in this exact format:
 ${GRADE_RESULT_JSON_SCHEMA}
 
 Critical scoring rule:
 - "totalScore" MUST equal the exact sum of all criterionResults[i].score.
-- "maxPossibleScore" MUST equal the exact sum of all rubric max points.
+- If JSON payload rubric.criteria is provided, "maxPossibleScore" MUST equal the exact sum of rubric.criteria[i].maxPoints.
+- If rubric.criteria is empty and rubric comes from rubric.context, infer the rubric criteria and max points from rubric.context.
+
+Input handling rules:
+- The payload contains pre-processed text artifacts produced during upload.
+- Use rubric.criteria as authoritative when present.
+- Use rubric.context and submission.content as the primary textual sources.
+- submission.url can provide provenance, but grade from submission.content.
 
 The output must be strictly valid JSON with no additional text.`;
 
-  const finalPrompt = `Assignment:
-${config.prompt}
+  const finalPrompt = `Grade this submission using the following JSON payload:
 
-Rubric:
-${rubricBlock}
-
-Grading Type:
-${config.feedbackStyle}
-${styleInstruction}
-
-Student Name:
-${submission.studentName}
-
-Student Work:
-${studentWork}`;
+${JSON.stringify(gradingPayload)}`;
 
   const messages: OllamaMessage[] = [
     { role: 'system', content: systemPrompt },

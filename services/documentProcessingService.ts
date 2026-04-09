@@ -1,53 +1,42 @@
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
-import * as mammoth from 'mammoth';
+import { FileData, RubricCriterion } from '../types';
+import { parseRubricFromMarkdown } from './ollamaService';
 
-const OPENWEBUI_OCR_API_URL = '/backend/api/ocr';
-const OCR_MODEL = 'deepseek-ocr:latest';
-const OCR_PROMPT = '<image>\n<|grounding|>Convert the document to markdown.';
-
-GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.mjs',
-  import.meta.url
-).toString();
-
-interface OllamaOcrResponse {
-  content?: string;
-  error?: string;
-}
-
-type SourceKind = 'pdf' | 'docx' | 'image' | 'text';
-type TraceFlow = 'rubric' | 'submission';
-
-interface ProcessingTrace {
-  flow: TraceFlow;
-  fileName: string;
-  enabled: boolean;
-}
+type SourceKind = 'pdf' | 'docx' | 'image' | 'text' | 'binary';
 
 export interface ProcessedRubricDocument {
-  markdown: string;
   context: string;
   sourceKind: SourceKind;
   pageCount: number;
+  fileData: FileData;
+  criteria: RubricCriterion[];
+  warnings: string[];
 }
 
 export interface ProcessedSubmissionDocument {
   content: string;
-  markdown: string;
   sourceKind: SourceKind;
   pageCount: number;
+  fileData: FileData;
+  warnings: string[];
 }
 
-const createTrace = (flow: TraceFlow, fileName: string, enabled: boolean): ProcessingTrace => ({
-  flow,
-  fileName,
-  enabled,
-});
+interface ExtractedTextResult {
+  text: string;
+  pageCount: number;
+  warnings: string[];
+}
 
-const traceLog = (trace: ProcessingTrace | undefined, step: string, message: string): void => {
-  if (!trace?.enabled) return;
-  console.log(`[UploadTrace][${trace.flow}][${trace.fileName}][${step}] ${message}`);
-};
+interface OpenWebUIBackendResponse {
+  content: string;
+  elapsedMs?: number;
+  error?: string;
+}
+
+const MAX_RUBRIC_PARSE_CHARS = 18000;
+const MAX_RUBRIC_CONTEXT_CHARS = 5000;
+const MAX_SUBMISSION_CHARS = 14000;
+const MAX_OCR_PAGES = 8;
+const OPENWEBUI_BACKEND_CHAT_URL = '/backend/api/chat';
 
 const isPdfFile = (file: File): boolean =>
   file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
@@ -63,6 +52,41 @@ const isTextFile = (file: File): boolean => {
   return file.type.startsWith('text/') || lowerName.endsWith('.txt') || lowerName.endsWith('.md');
 };
 
+const detectSourceKind = (file: File): SourceKind => {
+  if (isPdfFile(file)) return 'pdf';
+  if (isDocxFile(file)) return 'docx';
+  if (isImageFile(file)) return 'image';
+  if (isTextFile(file)) return 'text';
+  return 'binary';
+};
+
+const formatSize = (sizeBytes: number): string => {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const normalizeWhitespace = (text: string): string =>
+  text
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+const capText = (text: string, maxChars: number): { value: string; wasTruncated: boolean } => {
+  if (text.length <= maxChars) return { value: text, wasTruncated: false };
+  return {
+    value: `${text.slice(0, maxChars)}\n\n[Truncated to fit prompt budget.]`,
+    wasTruncated: true,
+  };
+};
+
+const createFileData = (file: File): FileData => ({
+  mimeType: file.type || 'application/octet-stream',
+  name: file.name,
+  sizeBytes: file.size,
+});
+
 const readAsDataUrl = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -71,244 +95,408 @@ const readAsDataUrl = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
-const fileToBase64 = async (file: File): Promise<string> => {
-  const dataUrl = await readAsDataUrl(file);
-  const [, base64 = ''] = dataUrl.split(',');
-  if (!base64) throw new Error(`Could not encode ${file.name} as base64.`);
+const imageFileToPngBase64 = async (file: File): Promise<string> => {
+  const sourceDataUrl = await readAsDataUrl(file);
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Could not decode image ${file.name}`));
+    img.src = sourceDataUrl;
+  });
+
+  const canvas = document.createElement('canvas');
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!width || !height) {
+    throw new Error(`Image has invalid dimensions: ${file.name}`);
+  }
+
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Could not initialize canvas for image OCR.');
+  }
+  context.drawImage(image, 0, 0);
+
+  const pngDataUrl = canvas.toDataURL('image/png');
+  const [, base64 = ''] = pngDataUrl.split(',');
+  if (!base64) throw new Error(`Could not convert ${file.name} to PNG base64.`);
   return base64;
 };
 
-const runOcrForImage = async (
-  imageBase64: string,
-  trace?: ProcessingTrace,
-  pageNumber?: number,
-  totalPages?: number
-): Promise<string> => {
-  const pageLabel = pageNumber && totalPages ? `page ${pageNumber}/${totalPages}` : 'single image';
-  traceLog(trace, 'ocr.request.start', `Sending API request to DeepSeek OCR for ${pageLabel}.`);
-
-  const response = await fetch(OPENWEBUI_OCR_API_URL, {
+const callVisionOcr = async (imageBase64: string, prompt: string): Promise<string> => {
+  const response = await fetch(OPENWEBUI_BACKEND_CHAT_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: OCR_MODEL,
-      prompt: OCR_PROMPT,
-      imageBase64,
+      messages: [{ role: 'user', content: prompt, images: [imageBase64] }],
+      jsonFormat: false,
+      temperature: 0,
     }),
   });
 
   if (!response.ok) {
-    traceLog(trace, 'ocr.request.error', `DeepSeek OCR request failed with status ${response.status}.`);
-    throw new Error(`OCR request failed: ${response.status} ${response.statusText}`);
+    const errorBody = await response.text();
+    throw new Error(`Vision OCR request failed (${response.status}): ${errorBody || response.statusText}`);
   }
-  traceLog(trace, 'ocr.request.success', `DeepSeek OCR responded successfully for ${pageLabel}.`);
 
-  const data = (await response.json()) as OllamaOcrResponse;
-  const extractedText = (data.content || '').trim();
-  traceLog(trace, 'ocr.extract.success', `OCR text extracted for ${pageLabel} (${extractedText.length} chars).`);
-  return extractedText;
+  const data: OpenWebUIBackendResponse = await response.json();
+  return normalizeWhitespace(data.content || '');
 };
 
-const flattenImagePagesToMarkdown = async (
-  pages: string[],
-  trace?: ProcessingTrace
-): Promise<string> => {
-  const pageMarkdown: string[] = new Array(pages.length);
-  traceLog(trace, 'ocr.batch.start', `Starting OCR over ${pages.length} page image(s).`);
+const runVisionOcrOnPages = async (
+  pageImages: string[],
+  sourceLabel: 'pdf' | 'image'
+): Promise<{ text: string; warnings: string[] }> => {
+  const warnings: string[] = [];
+  if (pageImages.length === 0) {
+    return { text: '', warnings };
+  }
 
-  const concurrency = Math.min(3, pages.length);
-  let cursor = 0;
-  const workers = Array.from({ length: concurrency }, async () => {
-    while (true) {
-      const currentIndex = cursor;
-      cursor += 1;
-      if (currentIndex >= pages.length) return;
+  const selectedPages =
+    pageImages.length > MAX_OCR_PAGES ? pageImages.slice(0, MAX_OCR_PAGES) : pageImages;
 
-      const pageNumber = currentIndex + 1;
-      traceLog(trace, 'ocr.page.start', `Starting OCR for page ${pageNumber}/${pages.length}.`);
-      const pageResult = await runOcrForImage(pages[currentIndex], trace, pageNumber, pages.length);
-      const header = pages.length > 1 ? `<!-- Page ${pageNumber} -->\n` : '';
-      pageMarkdown[currentIndex] = `${header}${pageResult}`.trim();
-      traceLog(trace, 'ocr.page.success', `Completed OCR for page ${pageNumber}/${pages.length}.`);
+  if (pageImages.length > MAX_OCR_PAGES) {
+    warnings.push(`OCR limited to first ${MAX_OCR_PAGES} pages to control upload-time cost.`);
+  }
+
+  const pageChunks: string[] = [];
+  for (let index = 0; index < selectedPages.length; index += 1) {
+    const pageNumber = index + 1;
+    try {
+      const pageText = await callVisionOcr(
+        selectedPages[index],
+        [
+          `Extract all readable text from this ${sourceLabel} page.`,
+          'Return plain text only.',
+          'Do not summarize or interpret.',
+          'Preserve headings, bullets, and line breaks when possible.',
+        ].join(' ')
+      );
+      if (pageText) {
+        pageChunks.push(`[Page ${pageNumber}] ${pageText}`);
+      } else {
+        warnings.push(`Vision OCR returned no text for page ${pageNumber}.`);
+      }
+    } catch (error: any) {
+      warnings.push(`Vision OCR failed on page ${pageNumber}: ${error?.message || 'Unknown OCR error'}`);
     }
-  });
+  }
 
-  await Promise.all(workers);
-
-  traceLog(trace, 'ocr.batch.success', 'Completed OCR for all image pages.');
-  return pageMarkdown.join('\n\n');
+  return {
+    text: pageChunks.join('\n\n'),
+    warnings,
+  };
 };
 
-const convertPdfToImagePages = async (file: File, trace?: ProcessingTrace): Promise<string[]> => {
-  traceLog(trace, 'pdf.load.start', 'Loading PDF and preparing page-to-image conversion.');
-  const pdfBytes = await file.arrayBuffer();
-  const pdf = await getDocument({ data: pdfBytes }).promise;
-  const imagePages: string[] = [];
-  traceLog(trace, 'pdf.load.success', `PDF loaded with ${pdf.numPages} page(s).`);
+let pdfWorkerConfigured = false;
+const getPdfJs = async (): Promise<any> => {
+  const pdfjs = (await import('pdfjs-dist/legacy/build/pdf.mjs')) as any;
+  if (!pdfWorkerConfigured && pdfjs?.GlobalWorkerOptions) {
+    try {
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        'pdfjs-dist/legacy/build/pdf.worker.mjs',
+        import.meta.url
+      ).toString();
+      pdfWorkerConfigured = true;
+    } catch {
+      // If worker URL setup fails, pdf.js can still run using a fake worker path in many environments.
+    }
+  }
+  return pdfjs;
+};
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    traceLog(trace, 'pdf.page.render.start', `Rendering page ${pageNumber}/${pdf.numPages} to image.`);
-    const page = await pdf.getPage(pageNumber);
+const renderPdfPagesToImages = async (doc: any): Promise<string[]> => {
+  const imagePages: string[] = [];
+  const totalPages = Math.min(doc.numPages || 1, MAX_OCR_PAGES);
+
+  for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+    const page = await doc.getPage(pageNumber);
     const viewport = page.getViewport({ scale: 2 });
     const canvas = document.createElement('canvas');
-    const canvasContext = canvas.getContext('2d');
-
-    if (!canvasContext) {
-      throw new Error('Unable to initialize canvas rendering context for PDF conversion.');
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Could not initialize canvas for PDF rendering.');
     }
-
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
-
-    await page.render({ canvas, canvasContext, viewport }).promise;
-
+    await page.render({ canvasContext: context, viewport }).promise;
     const dataUrl = canvas.toDataURL('image/png');
     const [, base64 = ''] = dataUrl.split(',');
-    if (!base64) {
-      throw new Error(`Failed to convert PDF page ${pageNumber} into an image.`);
+    if (base64) {
+      imagePages.push(base64);
     }
-    imagePages.push(base64);
-    traceLog(trace, 'pdf.page.render.success', `Converted page ${pageNumber}/${pdf.numPages} to image.`);
   }
 
-  traceLog(trace, 'pdf.convert.success', `PDF converted to ${imagePages.length} image page(s).`);
   return imagePages;
 };
 
-const convertDocxToText = async (file: File, trace?: ProcessingTrace): Promise<string> => {
-  traceLog(trace, 'docx.extract.start', 'Extracting raw text from DOCX.');
-  const buffer = await file.arrayBuffer();
-  const result = await mammoth.extractRawText({ arrayBuffer: buffer });
-  const text = result.value.trim();
-  traceLog(trace, 'docx.extract.success', `DOCX text extracted (${text.length} chars).`);
-  return text;
+const extractPdfText = async (file: File): Promise<ExtractedTextResult> => {
+  const warnings: string[] = [];
+  const pdfjs = await getPdfJs();
+  const data = new Uint8Array(await file.arrayBuffer());
+  const loadingTask = pdfjs.getDocument({
+    data,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+  });
+  const doc = await loadingTask.promise;
+  const pageCount = doc.numPages || 1;
+
+  try {
+    const pageChunks: string[] = [];
+    try {
+      for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+        const page = await doc.getPage(pageNumber);
+        const textContent = await page.getTextContent();
+        const pageText = normalizeWhitespace(
+          textContent.items.map((item: any) => (typeof item?.str === 'string' ? item.str : '')).join(' ')
+        );
+        if (pageText) {
+          pageChunks.push(`[Page ${pageNumber}] ${pageText}`);
+        }
+      }
+    } catch (error: any) {
+      warnings.push(`PDF text-layer extraction failed: ${error?.message || 'Unknown parse error'}`);
+    }
+
+    if (pageChunks.length > 0) {
+      return {
+        text: pageChunks.join('\n\n'),
+        pageCount,
+        warnings,
+      };
+    }
+
+    warnings.push('No embedded PDF text found. Falling back to model OCR/image analysis.');
+
+    const pageImages = await renderPdfPagesToImages(doc);
+    const ocr = await runVisionOcrOnPages(pageImages, 'pdf');
+    warnings.push(...ocr.warnings);
+
+    return {
+      text: ocr.text,
+      pageCount,
+      warnings,
+    };
+  } finally {
+    if (typeof doc?.destroy === 'function') {
+      try {
+        await doc.destroy();
+      } catch {
+        // no-op
+      }
+    }
+  }
 };
 
-const formatRubricContext = (markdown: string, sourceKind: SourceKind, pageCount: number): string => {
-  const sourceDescription =
-    sourceKind === 'pdf'
-      ? `PDF (${pageCount} page${pageCount === 1 ? '' : 's'})`
-      : sourceKind === 'image'
-        ? 'image upload'
-        : sourceKind === 'docx'
-          ? 'DOCX text extraction'
-          : 'text upload';
-
-  return [
-    'Rubric reference (uploaded document):',
-    `This rubric was extracted from a ${sourceDescription}.`,
-    sourceKind === 'docx' || sourceKind === 'text'
-      ? 'Formatting: plain extracted text from the source document.'
-      : 'Formatting: OCR markdown generated by deepseek-ocr:latest, which may include HTML-like blocks.',
-    '',
-    'Rubric content:',
-    markdown.trim(),
-  ].join('\n');
+const extractImageText = async (file: File): Promise<ExtractedTextResult> => {
+  const base64 = await imageFileToPngBase64(file);
+  const ocr = await runVisionOcrOnPages([base64], 'image');
+  return {
+    text: ocr.text,
+    pageCount: 1,
+    warnings: ocr.warnings,
+  };
 };
 
-const formatSubmissionContext = (
-  fileName: string,
-  markdown: string,
-  sourceKind: SourceKind,
-  pageCount: number
-): string => {
-  const sourceDescription =
-    sourceKind === 'pdf'
-      ? `PDF (${pageCount} page${pageCount === 1 ? '' : 's'})`
-      : sourceKind === 'image'
-        ? 'image file'
-        : sourceKind === 'docx'
-          ? 'DOCX file'
-          : 'text file';
+const extractDocxText = async (file: File): Promise<ExtractedTextResult> => {
+  const mammoth = (await import('mammoth')) as any;
+  const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+  const warnings: string[] = [];
+  if (Array.isArray(result?.messages)) {
+    for (const message of result.messages) {
+      const text = typeof message?.message === 'string' ? message.message : '';
+      if (text) warnings.push(`DOCX note: ${text}`);
+    }
+  }
 
-  return [
-    `Student submission extracted from file: ${fileName}`,
-    `Source type: ${sourceDescription}`,
-    sourceKind === 'docx' || sourceKind === 'text'
-      ? 'Formatting: extracted plain text.'
-      : 'Formatting: OCR markdown generated by deepseek-ocr:latest.',
-    '',
-    markdown.trim(),
-  ].join('\n');
+  return {
+    text: normalizeWhitespace(typeof result?.value === 'string' ? result.value : ''),
+    pageCount: 1,
+    warnings,
+  };
 };
 
-const extractMarkdownFromFile = async (
+const extractTextFromFile = async (file: File, sourceKind: SourceKind): Promise<ExtractedTextResult> => {
+  if (sourceKind === 'text') {
+    return {
+      text: normalizeWhitespace(await file.text()),
+      pageCount: 1,
+      warnings: [],
+    };
+  }
+
+  if (sourceKind === 'pdf') {
+    return extractPdfText(file);
+  }
+
+  if (sourceKind === 'docx') {
+    return extractDocxText(file);
+  }
+
+  if (sourceKind === 'image') {
+    return extractImageText(file);
+  }
+
+  return {
+    text: '',
+    pageCount: 1,
+    warnings: ['Unsupported file type for text extraction.'],
+  };
+};
+
+const normalizeCriteria = (criteria: RubricCriterion[]): RubricCriterion[] =>
+  criteria
+    .filter((criterion) => criterion && typeof criterion.name === 'string' && criterion.name.trim().length > 0)
+    .map((criterion, index) => ({
+      id: criterion.id?.trim() || `criterion_${index + 1}`,
+      name: criterion.name.trim(),
+      description: (criterion.description || '').trim(),
+      maxPoints: Number.isFinite(Number(criterion.maxPoints)) ? Number(criterion.maxPoints) : 10,
+    }));
+
+const buildStoredRubricContext = (
   file: File,
-  trace?: ProcessingTrace
-): Promise<{ markdown: string; sourceKind: SourceKind; pageCount: number }> => {
-  traceLog(trace, 'extract.start', `Starting extraction for mime type: ${file.type || 'unknown'}.`);
-  if (isPdfFile(file)) {
-    traceLog(trace, 'path.select', 'Detected PDF input. Route: PDF -> images -> DeepSeek OCR.');
-    const imagePages = await convertPdfToImagePages(file, trace);
-    const markdown = await flattenImagePagesToMarkdown(imagePages, trace);
-    traceLog(trace, 'extract.success', `PDF extraction complete (${markdown.length} chars).`);
-    return { markdown, sourceKind: 'pdf', pageCount: imagePages.length };
+  sourceKind: SourceKind,
+  extractedText: string,
+  criteriaCount: number,
+  warnings: string[],
+  textWasTruncated: boolean
+): string => {
+  const lines = [
+    'Rubric source (uploaded file):',
+    `File name: ${file.name}`,
+    `Source type: ${sourceKind}`,
+    `Size: ${formatSize(file.size)}`,
+    `Extracted criteria: ${criteriaCount}`,
+  ];
+
+  if (textWasTruncated) {
+    lines.push('Extraction note: rubric text was truncated to fit prompt budget.');
   }
 
-  if (isDocxFile(file)) {
-    traceLog(trace, 'path.select', 'Detected DOCX input. Route: DOCX -> text (skip OCR).');
-    const markdown = await convertDocxToText(file, trace);
-    traceLog(trace, 'extract.success', `DOCX extraction complete (${markdown.length} chars).`);
-    return { markdown, sourceKind: 'docx', pageCount: 1 };
+  if (warnings.length > 0) {
+    lines.push(`Warnings: ${warnings.join(' | ')}`);
   }
 
-  if (isImageFile(file)) {
-    traceLog(trace, 'path.select', 'Detected image input. Route: image -> DeepSeek OCR.');
-    const imageBase64 = await fileToBase64(file);
-    traceLog(trace, 'image.encode.success', 'Image encoded to base64 for OCR request.');
-    const markdown = await flattenImagePagesToMarkdown([imageBase64], trace);
-    traceLog(trace, 'extract.success', `Image OCR extraction complete (${markdown.length} chars).`);
-    return { markdown, sourceKind: 'image', pageCount: 1 };
+  if (extractedText) {
+    lines.push('');
+    lines.push('Condensed rubric text:');
+    lines.push(extractedText);
   }
 
-  if (isTextFile(file)) {
-    traceLog(trace, 'path.select', 'Detected text input. Route: passthrough text extraction.');
-    const markdown = (await file.text()).trim();
-    traceLog(trace, 'extract.success', `Text extraction complete (${markdown.length} chars).`);
-    return { markdown, sourceKind: 'text', pageCount: 1 };
+  return lines.join('\n');
+};
+
+const buildStoredSubmissionContent = (
+  file: File,
+  sourceKind: SourceKind,
+  extractedText: string,
+  warnings: string[],
+  textWasTruncated: boolean
+): string => {
+  const lines = [
+    `Student submission source: ${file.name}`,
+    `Source type: ${sourceKind}`,
+    `Size: ${formatSize(file.size)}`,
+  ];
+
+  if (warnings.length > 0) {
+    lines.push(`Warnings: ${warnings.join(' | ')}`);
   }
 
-  traceLog(trace, 'extract.error', 'Unsupported file type encountered.');
-  throw new Error(`Unsupported file type: ${file.name}`);
+  if (textWasTruncated) {
+    lines.push('Extraction note: submission text was truncated to fit prompt budget.');
+  }
+
+  if (extractedText) {
+    lines.push('');
+    lines.push('Extracted submission text:');
+    lines.push(extractedText);
+  } else {
+    lines.push('No readable text could be extracted from this file.');
+  }
+
+  return lines.join('\n');
 };
 
 export const processRubricUpload = async (file: File): Promise<ProcessedRubricDocument> => {
-  const trace = createTrace('rubric', file.name, true);
-  traceLog(trace, 'workflow.start', 'Rubric extraction workflow started.');
-  const { markdown, sourceKind, pageCount } = await extractMarkdownFromFile(file, trace);
+  const sourceKind = detectSourceKind(file);
+  let extraction: ExtractedTextResult;
+  try {
+    extraction = await extractTextFromFile(file, sourceKind);
+  } catch (error: any) {
+    extraction = {
+      text: '',
+      pageCount: 1,
+      warnings: [`Extraction failed: ${error?.message || 'Unknown extraction error'}`],
+    };
+  }
+  const extractedText = normalizeWhitespace(extraction.text);
+  const rubricTextForParsing = capText(extractedText, MAX_RUBRIC_PARSE_CHARS);
+  const rubricTextForContext = capText(extractedText, MAX_RUBRIC_CONTEXT_CHARS);
+  const warnings = [...extraction.warnings];
 
-  if (!markdown.trim()) {
-    traceLog(trace, 'workflow.error', 'Extraction produced empty rubric content.');
-    throw new Error(`No rubric content extracted from ${file.name}.`);
+  let criteria: RubricCriterion[] = [];
+  if (rubricTextForParsing.value) {
+    try {
+      const parsedCriteria = await parseRubricFromMarkdown(rubricTextForParsing.value);
+      criteria = normalizeCriteria(parsedCriteria || []);
+    } catch (error: any) {
+      console.error(`[RubricExtraction][upload.parse.error] ${file.name}`, error);
+      warnings.push('Rubric criteria extraction failed. You can add criteria manually.');
+    }
+  } else {
+    warnings.push('No rubric text extracted. Add criteria manually if needed.');
   }
 
-  const context = formatRubricContext(markdown, sourceKind, pageCount);
-  traceLog(
-    trace,
-    'workflow.success',
-    `Rubric extraction complete. source=${sourceKind}, pages=${pageCount}, markdownChars=${markdown.length}, contextChars=${context.length}.`
-  );
+  if (rubricTextForParsing.wasTruncated) {
+    warnings.push('Rubric parsing used a truncated text window due to size limits.');
+  }
+
+  const shouldStoreContext = rubricTextForContext.value.trim().length > 0;
 
   return {
-    markdown,
+    context: shouldStoreContext
+      ? buildStoredRubricContext(
+          file,
+          sourceKind,
+          rubricTextForContext.value,
+          criteria.length,
+          warnings,
+          rubricTextForContext.wasTruncated
+        )
+      : '',
     sourceKind,
-    pageCount,
-    context,
+    pageCount: extraction.pageCount,
+    fileData: createFileData(file),
+    criteria,
+    warnings,
   };
 };
 
 export const processSubmissionUpload = async (file: File): Promise<ProcessedSubmissionDocument> => {
-  const trace = createTrace('submission', file.name, false);
-  const { markdown, sourceKind, pageCount } = await extractMarkdownFromFile(file, trace);
-
-  if (!markdown.trim()) {
-    throw new Error(`No submission content extracted from ${file.name}.`);
+  const sourceKind = detectSourceKind(file);
+  let extraction: ExtractedTextResult;
+  try {
+    extraction = await extractTextFromFile(file, sourceKind);
+  } catch (error: any) {
+    extraction = {
+      text: '',
+      pageCount: 1,
+      warnings: [`Extraction failed: ${error?.message || 'Unknown extraction error'}`],
+    };
   }
+  const extractedText = normalizeWhitespace(extraction.text);
+  const capped = capText(extractedText, MAX_SUBMISSION_CHARS);
 
   return {
-    markdown,
+    content: buildStoredSubmissionContent(file, sourceKind, capped.value, extraction.warnings, capped.wasTruncated),
     sourceKind,
-    pageCount,
-    content: formatSubmissionContext(file.name, markdown, sourceKind, pageCount),
+    pageCount: extraction.pageCount,
+    fileData: createFileData(file),
+    warnings: extraction.warnings,
   };
 };

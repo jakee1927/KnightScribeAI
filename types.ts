@@ -7,8 +7,10 @@ export interface RubricCriterion {
 }
 
 export interface FileData {
-  data: string; // base64
+  data?: string; // optional base64 payload (kept empty for staged processing mode)
   mimeType: string;
+  name?: string;
+  sizeBytes?: number;
 }
 
 export type FeedbackStyle = 
@@ -23,7 +25,7 @@ export interface Submission {
   studentName: string;
   content: string; // text representation
   url?: string; // Optional URL for Google Docs
-  fileData?: FileData; // optional binary data for better AI understanding
+  fileData?: FileData; // optional source metadata (base64 payload may be omitted in staged mode)
   origin?: 'manual' | 'url' | 'uploaded_file';
   status: 'pending' | 'grading' | 'completed' | 'error';
   result?: GradeResult;
@@ -53,6 +55,7 @@ export interface GradingConfig {
   prompt: string;
   rubric: RubricCriterion[];
   rubricContext: string;
+  rubricFile?: FileData;
   gradeLevel: GradeLevel;
   feedbackStyle: FeedbackStyle;
   autoInsertFeedback: boolean;

@@ -1,8 +1,7 @@
 
 import React, { useState } from 'react';
-import { RubricCriterion } from '../types';
+import { FileData, RubricCriterion } from '../types';
 import { Plus, Trash2, FileUp, Loader2, Sparkles, Link as LinkIcon } from 'lucide-react';
-import { parseRubricFromMarkdown, parseRubricFromUrl } from '../services/ollamaService';
 import { processRubricUpload } from '../services/documentProcessingService';
 
 interface Props {
@@ -10,9 +9,18 @@ interface Props {
   setRubric: (rubric: RubricCriterion[]) => void;
   rubricContext: string;
   setRubricContext: (context: string) => void;
+  rubricFile?: FileData;
+  setRubricFile: (file?: FileData) => void;
 }
 
-const RubricEditor: React.FC<Props> = ({ rubric, setRubric, rubricContext, setRubricContext }) => {
+const RubricEditor: React.FC<Props> = ({
+  rubric,
+  setRubric,
+  rubricContext,
+  setRubricContext,
+  rubricFile,
+  setRubricFile,
+}) => {
   const [isImporting, setIsImporting] = useState(false);
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [url, setUrl] = useState('');
@@ -44,20 +52,16 @@ const RubricEditor: React.FC<Props> = ({ rubric, setRubric, rubricContext, setRu
     setIsImporting(true);
     try {
       const processedRubric = await processRubricUpload(file);
+      setRubric(processedRubric.criteria);
       setRubricContext(processedRubric.context);
-
-      const extractedCriteria = await parseRubricFromMarkdown(processedRubric.markdown);
-      if (extractedCriteria.length > 0) {
-        // File import should replace any existing rubric criteria from prior state.
-        setRubric(extractedCriteria);
-      } else {
-        // Avoid leaving stale criteria visible if OCR content was saved but parsing returned none.
-        setRubric([]);
-        alert('Rubric text was extracted and saved, but no structured criteria were detected. Grading will still use the uploaded rubric context.');
+      setRubricFile(processedRubric.fileData);
+      if (processedRubric.warnings.length > 0) {
+        alert(processedRubric.warnings.join('\n'));
       }
     } catch (error) {
-      console.error("Failed to parse rubric:", error);
-      alert("Failed to extract rubric. Please ensure the file is a readable PDF, Word, image, or text document.");
+      console.error("Failed to save rubric file:", error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      alert(`Failed to save rubric file: ${message}`);
     } finally {
       setIsImporting(false);
       e.target.value = '';
@@ -69,12 +73,19 @@ const RubricEditor: React.FC<Props> = ({ rubric, setRubric, rubricContext, setRu
     setIsImporting(true);
     setShowUrlInput(false);
     try {
-      const extractedCriteria = await parseRubricFromUrl(url);
-      setRubric([...rubric, ...extractedCriteria]);
+      setRubricFile(undefined);
+      setRubricContext(
+        [
+          'Rubric reference (URL):',
+          'This URL will be sent to the model during grading.',
+          `URL: ${url.trim()}`,
+        ].join('\n')
+      );
+      setRubric([]);
       setUrl('');
     } catch (error) {
-      console.error("Failed to parse rubric from URL:", error);
-      alert("Failed to extract rubric from the link. Make sure the Google Doc is shared as 'Anyone with the link can view'.");
+      console.error("Failed to save rubric URL:", error);
+      alert("Failed to save rubric URL.");
     } finally {
       setIsImporting(false);
     }
@@ -85,7 +96,7 @@ const RubricEditor: React.FC<Props> = ({ rubric, setRubric, rubricContext, setRu
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h3 className="text-lg font-semibold text-slate-700">Grading Rubric</h3>
-          <p className="text-xs text-slate-500">Add criteria manually or import from PDF, Word, image, text, or Google Doc links.</p>
+          <p className="text-xs text-slate-500">Add criteria manually, or upload a rubric file to parse and store now (before final grading).</p>
         </div>
         
         <div className="flex flex-wrap items-center gap-2">
@@ -104,7 +115,7 @@ const RubricEditor: React.FC<Props> = ({ rubric, setRubric, rubricContext, setRu
             ) : (
               <FileUp size={16} />
             )}
-            {isImporting ? 'Parsing...' : 'Upload File'}
+            {isImporting ? 'Saving...' : 'Upload File'}
             <input
               type="file"
               accept=".pdf,.txt,.md,.docx,image/*,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -149,7 +160,9 @@ const RubricEditor: React.FC<Props> = ({ rubric, setRubric, rubricContext, setRu
 
       {rubricContext.trim() && !isImporting && (
         <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-xl text-xs text-emerald-700">
-          Uploaded rubric content is saved and will be sent with each student submission during grading.
+          {rubricFile?.name
+            ? `Parsed and saved rubric file "${rubricFile.name}". Structured rubric data is now stored for grading.`
+            : 'Rubric reference is saved in staged form for grading.'}
         </div>
       )}
 
@@ -167,8 +180,8 @@ const RubricEditor: React.FC<Props> = ({ rubric, setRubric, rubricContext, setRu
         {isImporting && (
           <div className="p-12 text-center bg-white border border-slate-200 rounded-xl shadow-sm">
             <Loader2 size={32} className="animate-spin text-indigo-500 mx-auto mb-4" />
-            <h4 className="font-semibold text-slate-700">AI Processing...</h4>
-            <p className="text-sm text-slate-500 mt-2">Converting upload, running OCR if needed, and extracting rubric criteria.</p>
+            <h4 className="font-semibold text-slate-700">Parsing Rubric...</h4>
+            <p className="text-sm text-slate-500 mt-2">We are extracting rubric text and storing structured criteria now to keep final grading prompts small.</p>
           </div>
         )}
 

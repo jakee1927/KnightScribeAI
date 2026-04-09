@@ -52,6 +52,7 @@ const SubmissionManager: React.FC<Props> = ({ submissions, setSubmissions }) => 
 
     setIsProcessingFiles(true);
     const processErrors: string[] = [];
+    const processWarnings: string[] = [];
 
     try {
       for (let index = 0; index < files.length; index += 1) {
@@ -64,18 +65,26 @@ const SubmissionManager: React.FC<Props> = ({ submissions, setSubmissions }) => 
             id: Math.random().toString(36).substr(2, 9),
             studentName: file.name.replace(/\.[^/.]+$/, ""),
             content: processed.content,
+            fileData: processed.fileData,
             origin: 'uploaded_file',
             status: 'pending',
           };
           setSubmissions((prev) => [...prev, newSub]);
+          if (processed.warnings.length > 0) {
+            processWarnings.push(`${file.name}: ${processed.warnings.join(' | ')}`);
+          }
         } catch (error) {
           console.error(`Failed to process ${file.name}:`, error);
-          processErrors.push(file.name);
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          processErrors.push(`${file.name} (${message})`);
         }
       }
 
       if (processErrors.length > 0) {
         alert(`Some files could not be processed: ${processErrors.join(', ')}`);
+      }
+      if (processWarnings.length > 0) {
+        alert(`Some files need attention:\n${processWarnings.join('\n')}`);
       }
     } finally {
       setIsProcessingFiles(false);
@@ -146,13 +155,13 @@ const SubmissionManager: React.FC<Props> = ({ submissions, setSubmissions }) => 
           </div>
           <div>
             <h4 className="font-semibold text-slate-700">Batch Upload Submissions</h4>
-            <p className="text-xs text-slate-500 px-4 mt-1">Upload .txt, .pdf, .docx, or image files. PDF/image files are OCR-converted to markdown first.</p>
+            <p className="text-xs text-slate-500 px-4 mt-1">Upload .txt, .pdf, .docx, or image files. We extract and store grading-ready text now to keep final prompts smaller.</p>
           </div>
           <label className={`bg-slate-800 text-white px-6 py-2 rounded-lg transition-colors font-medium ${isProcessingFiles ? 'opacity-70 pointer-events-none' : 'cursor-pointer hover:bg-slate-900'}`}>
             {isProcessingFiles ? (
               <span className="inline-flex items-center gap-2">
                 <Loader2 size={16} className="animate-spin" />
-                Processing...
+                Extracting...
               </span>
             ) : (
               'Choose Files'
